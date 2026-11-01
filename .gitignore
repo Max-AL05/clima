@@ -1,0 +1,14 @@
+# Binarios compilados
+/clima
+/clima.exe
+*.exe
+*.test
+*.out
+
+# Variables de entorno / secretos
+.env
+.env.*
+
+# Editores
+.vscode/
+.idea/
