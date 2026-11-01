@@ -1,4 +1,4 @@
-# 🌤️ clima
+# clima
 
 Herramienta de línea de comandos escrita en Go para consultar el **clima actual** y el **pronóstico** de una o varias ciudades usando la API de [OpenWeatherMap](https://openweathermap.org/api). Incluye gráfica de temperatura en la terminal, caché local, salida JSON y un pequeño servidor web.
 
@@ -100,12 +100,12 @@ Los colores se desactivan automáticamente si la salida no es una terminal o si 
 
 ```
 Temperatura (°C), próximas 24 horas:
-  20.7 │                                           ████ 
-       │ ▅▅▅▅                                      ████ 
-       │ ████  ▄▄▄▄                                ████ 
-       │ ████  ████  ▁▁▁▁                    ▆▆▆▆  ████ 
-       │ ████  ████  ████  ▂▂▂▂              ████  ████ 
-   9.8 │ ████  ████  ████  ████  ▃▃▃▃  ▁▁▁▁  ████  ████ 
+  20.7 │                                             ████ 
+       │ ▅▅                                        ████ 
+       │ ████  ▄▄▄▄                                  ████ 
+       │ ████  ████  ▁▁▁▁                     ▆▆▆   ████ 
+       │ ████  ████  ████  ▂▂                ████   ████ 
+   9.8 │ ████  ████  ████  ████  ▃▃▃  ▁▁▁▁  ████  ████ 
        └────────────────────────────────────────────────
           18    16    13    12    10    10    15    21  
          15h   18h   21h   00h   03h   06h   09h   12h  
@@ -155,7 +155,7 @@ GET /api/clima?ciudad=Madrid&ciudad=Lima&pronostico=1&unidades=metric&idioma=es
 | `unidades` | `metric`, `imperial` o `standard` |
 | `idioma` | Código de idioma, por ejemplo `es` |
 
-> ⚠️ El servidor no tiene autenticación y cada consulta gasta la cuota de **tu** API key. No lo expongas a internet sin protegerlo.
+>  El servidor no tiene autenticación y cada consulta gasta la cuota de **tu** API key. No lo expongas a internet sin protegerlo.
 
 ## Estructura del proyecto
 
