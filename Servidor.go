@@ -23,7 +23,7 @@ func escribirJSON(w http.ResponseWriter, estado int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-// manejadorAPI atiende GET /api/clima?ciudad=Madrid&ciudad=Lima&pronostico=1&unidades=metric&idioma=es
+// manejadorAPI atiende GET /api/clima?ciudad=Madrid&ciudad=Lima&pronostico=1&uv=1&unidades=metric&idioma=es
 func manejadorAPI(base *Cliente) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -58,7 +58,10 @@ func manejadorAPI(base *Cliente) http.HandlerFunc {
 			cli.Idioma = l
 		}
 
-		res := consultarCiudades(r.Context(), &cli, ciudades, q.Get("pronostico") == "1")
+		res := consultarCiudades(r.Context(), &cli, ciudades, Opciones{
+			Pronostico: q.Get("pronostico") == "1",
+			UV:         q.Get("uv") == "1",
+		})
 		escribirJSON(w, http.StatusOK, res)
 	}
 }

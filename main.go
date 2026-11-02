@@ -2,11 +2,13 @@
 //
 // Uso:
 //
-//	export OPENWEATHER_API_KEY=tu_llave o $env:OPENWEATHER_API_KEY = "tu_llave"
+//	export OPENWEATHER_API_KEY=tu_llave
 //	go run . Madrid
 //	go run . Buenos Aires
 //	go run . -pronostico "Madrid; Lima; Bogotá"   (las opciones van ANTES de la ciudad)
-//	go run . -grafica Madrid                      (gráfica de las próximas 24 horas)
+//	go run . -grafica Madrid                      (gráfica de temperatura, próximas 24 h)
+//	go run . -serie lluvia,humedad,viento Madrid  (otras series; implica -grafica)
+//	go run . -uv -pronostico Madrid               (índice UV actual y máximo por día)
 //	go run . -json -pronostico Madrid | jq        (salida JSON para scripts)
 //	go run . -servidor :8080
 package main
@@ -17,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -53,6 +56,8 @@ func run() int {
 	sinCache := flag.Bool("sin-cache", false, "no usar la caché local")
 	ttl := flag.Duration("cache-ttl", 10*time.Minute, "duración de la caché")
 	grafica := flag.Bool("grafica", false, "mostrar gráfica de temperatura de las próximas 24 horas")
+	serie := flag.String("serie", "", "series de la gráfica separadas por coma: temperatura, lluvia, humedad, viento, uv (implica -grafica)")
+	uv := flag.Bool("uv", false, "mostrar el índice UV (servicio gratuito Open-Meteo)")
 	salidaJSON := flag.Bool("json", false, "imprimir el resultado como JSON (sin colores ni texto decorativo)")
 	sinColor := flag.Bool("sin-color", false, "desactivar colores")
 	timeout := flag.Duration("timeout", 10*time.Second, "timeout de cada petición HTTP")
@@ -75,6 +80,17 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "Error: -idioma inválido (ejemplos: es, en, pt_br)")
 		return 2
 	}
+
+	series, err := parsearSeries(*serie)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		return 2
+	}
+	conGrafica := *grafica || len(series) > 0
+	if conGrafica && len(series) == 0 {
+		series = []string{SerieTemperatura}
+	}
+	conUV := *uv || slices.Contains(series, SerieUV)
 
 	// Las ciudades pueden venir sin comillas ("Buenos Aires"): unimos los argumentos con espacio.
 	ciudades := dividirCiudades(strings.Join(flag.Args(), " "))
@@ -132,7 +148,10 @@ func run() int {
 
 	color := !*sinColor && esTerminal() && os.Getenv("NO_COLOR") == ""
 	// La gráfica necesita los datos del pronóstico, aunque no se muestre el resumen diario.
-	resultados := consultarCiudades(ctx, cli, ciudades, *pronostico || *grafica)
+	resultados := consultarCiudades(ctx, cli, ciudades, Opciones{
+		Pronostico: *pronostico || conGrafica,
+		UV:         conUV,
+	})
 
 	fallos := 0
 	for _, r := range resultados {
@@ -143,7 +162,7 @@ func run() int {
 
 	if *salidaJSON {
 		// Los errores van dentro del JSON (campo "error"); el código de salida sigue siendo 1.
-		if err := imprimirJSON(os.Stdout, resultados, *pronostico, *grafica); err != nil {
+		if err := imprimirJSON(os.Stdout, resultados, *pronostico, conGrafica); err != nil {
 			fmt.Fprintln(os.Stderr, "Error al generar el JSON:", err)
 			return 1
 		}
@@ -153,12 +172,15 @@ func run() int {
 				fmt.Fprintf(os.Stderr, "Error (%s): %v\n", r.Ciudad, r.err)
 				continue
 			}
-			mostrarClima(os.Stdout, r.Clima, *unidades, color)
+			if r.Aviso != "" {
+				fmt.Fprintf(os.Stderr, "Aviso (%s): %s\n", r.Ciudad, r.Aviso)
+			}
+			mostrarClima(os.Stdout, r.Clima, r.UV, *unidades, color)
 			if *pronostico {
 				mostrarPronostico(os.Stdout, r.Pronostico, *unidades, color)
 			}
-			if *grafica {
-				mostrarGrafica(os.Stdout, r.Horas, *unidades, color)
+			if conGrafica {
+				mostrarGrafica(os.Stdout, r.Horas, series, *unidades, color)
 			}
 		}
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -16,7 +17,27 @@ const (
 	ansiVerde = "\033[32m"
 	ansiRojo  = "\033[31m"
 	ansiGris  = "\033[90m"
+
+	ansiAmarillo = "\033[33m"
+	ansiMagenta  = "\033[35m"
+	ansiCian     = "\033[36m"
+	ansiRojoVivo = "\033[91m"
 )
+
+// colorUV: un color por categoría de la escala de la OMS.
+func colorUV(v float64) string {
+	switch {
+	case v < 3:
+		return ansiVerde
+	case v < 6:
+		return ansiAmarillo
+	case v < 8:
+		return ansiRojoVivo
+	case v < 11:
+		return ansiRojo
+	}
+	return ansiMagenta
+}
 
 func pintar(activo bool, codigo, texto string) string {
 	if !activo {
@@ -81,7 +102,7 @@ func capitalizar(s string) string {
 	return strings.ToUpper(string(r[0])) + string(r[1:])
 }
 
-func mostrarClima(w io.Writer, c *Clima, unidades string, color bool) {
+func mostrarClima(w io.Writer, c *Clima, uv *UV, unidades string, color bool) {
 	sim := simboloTemp(unidades)
 	lugar := c.Name
 	if c.Sys.Country != "" {
@@ -98,6 +119,11 @@ func mostrarClima(w io.Writer, c *Clima, unidades string, color bool) {
 	fmt.Fprintf(w, "  Viento:       %.1f %s\n", c.Wind.Speed, unidadViento(unidades))
 	if d := c.Descripcion(); d != "" {
 		fmt.Fprintf(w, "  Condición:    %s\n", capitalizar(d))
+	}
+	if uv != nil {
+		txt := fmt.Sprintf("%.1f (%s)", uv.Actual, uv.Categoria)
+		fmt.Fprintf(w, "  Índice UV:    %s · máx. hoy %.1f\n", pintar(color, colorUV(uv.Actual), txt), uv.MaxHoy)
+		fmt.Fprintf(w, "    Hoy: %s\n", recomendacionUV(uv.MaxHoy))
 	}
 	fmt.Fprintf(w, "  Amanecer:     %s    Atardecer: %s (hora local)\n",
 		horaLocal(c.Sys.Sunrise, c.Timezone), horaLocal(c.Sys.Sunset, c.Timezone))
@@ -116,13 +142,134 @@ func mostrarPronostico(w io.Writer, dias []DiaPronostico, unidades string, color
 		}
 		min := pintar(color, colorTemp(d.TempMin, unidades), fmt.Sprintf("%5.1f%s", d.TempMin, sim))
 		max := pintar(color, colorTemp(d.TempMax, unidades), fmt.Sprintf("%5.1f%s", d.TempMax, sim))
-		fmt.Fprintf(w, "  %s  %s / %s  ☔ %3.0f%%  %s\n",
-			etiqueta, min, max, d.ProbLluvia, pintar(color, ansiGris, capitalizar(d.Descripcion)))
+		uvTxt := ""
+		if d.UVMax != nil {
+			uvTxt = pintar(color, colorUV(*d.UVMax), fmt.Sprintf(" UV %2.0f", *d.UVMax)) + "  "
+		}
+		fmt.Fprintf(w, "  %s  %s / %s   %3.0f%%  %s%s\n",
+			etiqueta, min, max, d.ProbLluvia, uvTxt, pintar(color, ansiGris, capitalizar(d.Descripcion)))
 	}
 	fmt.Fprintln(w, "-----------------------------")
 }
 
-// ---------- Gráfica de temperatura ----------
+// ---------- Gráficas ----------
+
+// Series que se pueden graficar con -serie.
+const (
+	SerieTemperatura = "temperatura"
+	SerieLluvia      = "lluvia"
+	SerieHumedad     = "humedad"
+	SerieViento      = "viento"
+	SerieUV          = "uv"
+)
+
+var seriesDisponibles = []string{SerieTemperatura, SerieLluvia, SerieHumedad, SerieViento, SerieUV}
+
+// parsearSeries convierte "lluvia, humedad" en []string{"lluvia", "humedad"}.
+// Valida los nombres y elimina repetidos. Una entrada vacía devuelve nil.
+func parsearSeries(entrada string) ([]string, error) {
+	var series []string
+	vistas := map[string]bool{}
+	for _, parte := range strings.Split(entrada, ",") {
+		nombre := strings.ToLower(strings.TrimSpace(parte))
+		if nombre == "" || vistas[nombre] {
+			continue
+		}
+		valida := false
+		for _, v := range seriesDisponibles {
+			if nombre == v {
+				valida = true
+				break
+			}
+		}
+		if !valida {
+			return nil, fmt.Errorf("serie desconocida %q (opciones: %s)", nombre, strings.Join(seriesDisponibles, ", "))
+		}
+		vistas[nombre] = true
+		series = append(series, nombre)
+	}
+	return series, nil
+}
+
+// Serie son los datos y el estilo de una gráfica de barras.
+type Serie struct {
+	Titulo  string
+	Valores []float64
+	Horas   []string
+	Color   func(float64) string // color ANSI de cada barra; puede ser nil
+	Formato string               // formato de los valores bajo cada barra, ej. "%.0f"
+	// Con Fija=true el eje va de Min a Max (útil en porcentajes y en escalas que empiezan en 0).
+	// Con Fija=false va de la mínima a la máxima de los datos.
+	Fija     bool
+	Min, Max float64
+}
+
+func maxValor(valores []float64) float64 {
+	m := math.Inf(-1)
+	for _, v := range valores {
+		m = math.Max(m, v)
+	}
+	return m
+}
+
+func colorFijo(c string) func(float64) string { return func(float64) string { return c } }
+
+// construirSerie extrae del pronóstico la serie pedida.
+func construirSerie(nombre string, puntos []PuntoHora, unidades string) (Serie, error) {
+	s := Serie{Horas: make([]string, len(puntos)), Valores: make([]float64, len(puntos)), Formato: "%.0f"}
+	for i, p := range puntos {
+		s.Horas[i] = p.Hora
+	}
+
+	switch nombre {
+	case SerieTemperatura:
+		s.Titulo = "Temperatura (" + strings.TrimSpace(simboloTemp(unidades)) + ")"
+		s.Color = func(v float64) string { return colorTemp(v, unidades) }
+		for i, p := range puntos {
+			s.Valores[i] = p.Temp
+		}
+	case SerieLluvia:
+		s.Titulo = "Probabilidad de lluvia (%)"
+		s.Color = colorFijo(ansiAzul)
+		s.Fija, s.Min, s.Max = true, 0, 100
+		for i, p := range puntos {
+			s.Valores[i] = p.ProbLluvia
+		}
+	case SerieHumedad:
+		s.Titulo = "Humedad (%)"
+		s.Color = colorFijo(ansiCian)
+		s.Fija, s.Min, s.Max = true, 0, 100
+		for i, p := range puntos {
+			s.Valores[i] = float64(p.Humedad)
+		}
+	case SerieViento:
+		s.Titulo = "Viento (" + unidadViento(unidades) + ")"
+		s.Formato = "%.1f"
+		s.Color = colorFijo(ansiMagenta)
+		for i, p := range puntos {
+			s.Valores[i] = p.Viento
+		}
+		s.Fija, s.Min, s.Max = true, 0, math.Max(maxValor(s.Valores), 1)
+	case SerieUV:
+		hay := false
+		for i, p := range puntos {
+			if p.UV != nil {
+				hay = true
+				s.Valores[i] = *p.UV
+			}
+		}
+		if !hay {
+			return Serie{}, errors.New("sin datos de UV (el servicio no respondió para esta ciudad)")
+		}
+		s.Titulo = "Índice UV"
+		s.Formato = "%.1f"
+		s.Color = colorUV
+		s.Fija, s.Min, s.Max = true, 0, math.Max(maxValor(s.Valores), 3)
+	default:
+		return Serie{}, fmt.Errorf("serie desconocida %q", nombre)
+	}
+	return s, nil
+}
 
 var bloques = []rune("▁▂▃▄▅▆▇█")
 
@@ -142,27 +289,37 @@ func centrar(s string, n int) string {
 	return strings.Repeat(" ", izq) + s + strings.Repeat(" ", falta-izq)
 }
 
-// graficaTemperatura dibuja una gráfica de barras verticales con bloques Unicode.
+// graficaBarras dibuja barras verticales con bloques Unicode.
 // Cada fila tiene resolución de 1/8 de carácter, así que alto=6 da 48 niveles.
-// El eje vertical NO empieza en cero: va de la temperatura mínima a la máxima.
-func graficaTemperatura(puntos []PuntoHora, unidades string, color bool, alto int) string {
-	if len(puntos) == 0 || alto < 1 {
+func graficaBarras(s Serie, color bool, alto int) string {
+	n := len(s.Valores)
+	if n == 0 || alto < 1 {
 		return ""
 	}
 
-	min, max := puntos[0].Temp, puntos[0].Temp
-	for _, p := range puntos {
-		min, max = math.Min(min, p.Temp), math.Max(max, p.Temp)
+	min, max := s.Min, s.Max
+	if !s.Fija {
+		min, max = s.Valores[0], s.Valores[0]
+		for _, v := range s.Valores {
+			min, max = math.Min(min, v), math.Max(max, v)
+		}
+	} else if max <= min {
+		max = min + 1
 	}
 
-	// Nivel de cada barra: entre 1 (la más baja) y alto*8 (la más alta).
 	total := alto * 8
-	niveles := make([]int, len(puntos))
-	for i, p := range puntos {
-		if max == min {
+	niveles := make([]int, n)
+	for i, v := range s.Valores {
+		switch {
+		case s.Fija:
+			// Escala con cero real: un valor en el mínimo no dibuja barra.
+			niv := int(math.Round((v - min) / (max - min) * float64(total)))
+			niveles[i] = int(math.Max(0, math.Min(float64(total), float64(niv))))
+		case max == min:
 			niveles[i] = total / 2
-		} else {
-			niveles[i] = 1 + int(math.Round((p.Temp-min)/(max-min)*float64(total-1)))
+		default:
+			// Escala automática: la barra más baja siempre mide al menos 1/8.
+			niveles[i] = 1 + int(math.Round((v-min)/(max-min)*float64(total-1)))
 		}
 	}
 
@@ -178,34 +335,34 @@ func graficaTemperatura(puntos []PuntoHora, unidades string, color bool, alto in
 		}
 
 		base := (fila - 1) * 8
-		for i, n := range niveles {
+		for i, nivel := range niveles {
 			celda := ' '
 			switch {
-			case n >= base+8:
+			case nivel >= base+8:
 				celda = '█'
-			case n > base:
-				celda = bloques[n-base-1]
+			case nivel > base:
+				celda = bloques[nivel-base-1]
 			}
 			barra := strings.Repeat(string(celda), anchoBarra)
-			if celda != ' ' {
-				barra = pintar(color, colorTemp(puntos[i].Temp, unidades), barra)
+			if celda != ' ' && s.Color != nil {
+				barra = pintar(color, s.Color(s.Valores[i]), barra)
 			}
 			b.WriteString(" " + barra + " ")
 		}
 		b.WriteByte('\n')
 	}
 
-	// Eje horizontal, temperaturas y horas.
-	b.WriteString("       └" + strings.Repeat("─", anchoColumna*len(puntos)) + "\n")
+	// Eje horizontal, valores y horas.
+	b.WriteString("       └" + strings.Repeat("─", anchoColumna*n) + "\n")
 	b.WriteString(strings.Repeat(" ", margenIzq))
-	for _, p := range puntos {
-		b.WriteString(centrar(fmt.Sprintf("%.0f", p.Temp), anchoColumna))
+	for _, v := range s.Valores {
+		b.WriteString(centrar(fmt.Sprintf(s.Formato, v), anchoColumna))
 	}
 	b.WriteByte('\n')
 	b.WriteString(strings.Repeat(" ", margenIzq))
-	for _, p := range puntos {
-		etiqueta := p.Hora
-		if t, err := time.Parse("2006-01-02T15:04", p.Hora); err == nil {
+	for _, h := range s.Horas {
+		etiqueta := h
+		if t, err := time.Parse("2006-01-02T15:04", h); err == nil {
 			etiqueta = t.Format("15") + "h"
 		}
 		b.WriteString(centrar(etiqueta, anchoColumna))
@@ -214,12 +371,32 @@ func graficaTemperatura(puntos []PuntoHora, unidades string, color bool, alto in
 	return b.String()
 }
 
-func mostrarGrafica(w io.Writer, puntos []PuntoHora, unidades string, color bool) {
+// graficaTemperatura es un atajo para la serie de temperatura.
+func graficaTemperatura(puntos []PuntoHora, unidades string, color bool, alto int) string {
+	s, err := construirSerie(SerieTemperatura, puntos, unidades)
+	if err != nil {
+		return ""
+	}
+	return graficaBarras(s, color, alto)
+}
+
+// mostrarGrafica imprime una gráfica por cada serie pedida.
+func mostrarGrafica(w io.Writer, puntos []PuntoHora, series []string, unidades string, color bool) {
 	if len(puntos) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "Temperatura (%s), próximas 24 horas:\n", strings.TrimSpace(simboloTemp(unidades)))
-	fmt.Fprint(w, graficaTemperatura(puntos, unidades, color, 6))
+	for i, nombre := range series {
+		s, err := construirSerie(nombre, puntos, unidades)
+		if err != nil {
+			fmt.Fprintf(w, "%s: %v\n", capitalizar(nombre), err)
+		} else {
+			fmt.Fprintf(w, "%s, próximas 24 horas:\n", s.Titulo)
+			fmt.Fprint(w, graficaBarras(s, color, 6))
+		}
+		if i < len(series)-1 {
+			fmt.Fprintln(w)
+		}
+	}
 	fmt.Fprintln(w, "-----------------------------")
 }
 
